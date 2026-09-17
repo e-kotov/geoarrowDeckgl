@@ -1,0 +1,159 @@
+addGeoArrowDeckglPolygonLayer = function(map, opts) {
+
+  // handle hex highlightColor - only if autoHighlight requested.
+  if (opts.renderOptions.autoHighlight &&
+    isHexColor(opts.renderOptions.highlightColor)) {
+      opts.renderOptions.highlightColor = hexToRGBABitwise(
+        opts.renderOptions.highlightColor
+      );
+    }
+
+  // FIXME: turn into function for re-use across layer types
+  // first we generate the proper internal layer name using the slot parameter
+  opts.decklayerId = "deck-layer-group-slot:" + opts.layerId;
+
+  // then, if 'beforeId' is supplied we change accordingly. see
+  // https://github.com/visgl/deck.gl/tree/master/modules/mapbox/src/resolve-layer-groups.ts#L13-L20
+  if (opts.renderOptions.beforeId !== null) {
+    opts.decklayerId = "deck-layer-group-before:" + opts.renderOptions.beforeId;
+  }
+
+  // FIXME: turn into function for re-use across layer types
+  // do we already have a deckgl mapboxoverlay on our map?
+  let deckoverlay = map._controls.find((el) => el.hasOwnProperty("_deck"));
+
+  if (deckoverlay === undefined) {
+    deckoverlay = new rdeckglgeoarrow.MapboxOverlay({
+      id: "geoarrow-deck-layer",
+      interleaved: opts.interleaved,
+      layers: [],
+      getCursor: ({ isHovering }) => (isHovering ? 'pointer' : 'grab'),
+      deviceProps: {
+        _cacheShaders: true,
+        _cachePipelines: true,
+      }
+    });
+    map.addControl(deckoverlay);
+  }
+
+  // find the attached arrow data, fetch and inject into the mapboxoverlay
+  let data_fl = document.getElementById(opts.layerId + '-geoarrowWidget-attachment');
+
+  opts.extension_type = guessExtension(data_fl.href);
+
+  fetch(data_fl.href)
+    .then(result => {
+      return parse2ArrowTable(result, opts.extension_type);
+    })
+    .then(arrow_table => {
+
+      const polygonlayers = [];
+      let len = arrow_table.batches.length;
+      let batch = {};
+      let id = [];
+
+      for (let i = 0; i < len; i++) {
+
+        batch = arrow_table.batches[i];
+        id = `${opts.layerId}-${i}`;
+        polygonlayers.push(polygonLayer(map, opts, batch, id));
+
+      }
+
+      // does the mapboxoverlay already have layer(s)?
+      if (deckoverlay._props.layers.length ===  0) {
+        deckoverlay.setProps({ layers: polygonlayers })
+      } else {
+        let lrs = deckoverlay._props.layers.concat(polygonlayers);
+        lrs = lrs.sort(function(a, b) {
+          return a.props.zIndex - b.props.zIndex;
+        });
+        deckoverlay.setProps({ layers: lrs });
+      }
+
+    });
+
+  map.on("projectiontransition", () => {
+    deckoverlay._updateViewState();
+  });
+
+};
+
+
+polygonLayer = function(map, opts, table, id) {
+
+  let table_names = table.schema.fields.map(obj => obj.name);
+
+  if (opts.popup === true) {
+    opts.popup = table_names;
+  }
+
+  if (opts.tooltip === true) {
+    opts.tooltip = table_names;
+  }
+
+  let layer = new rdeckglgeoarrow.gaDeckLayers.GeoArrowPolygonLayer({
+     id: id,
+    data: table,
+    slot: opts.layerId,
+
+    // render options
+    ...opts.renderOptions,
+
+    // interactivity
+    pickable: opts.pickable,
+
+    // GPU parameters (from luma.gl)
+    // see https://luma.gl/docs/api-reference/core/parameters for valid params
+    // this is currently mainly used to set 'depthCompare: "always"' to avoid
+    // z-fighting rendering issues. Passed via ... from R currently.
+    // (see https://github.com/developmentseed/lonboard/issues/1037)
+    parameters: opts.parameters,
+
+    // data accessors
+    getFillColor: table_names.includes(opts.dataAccessors.getFillColor) ?
+      ({ index, data }) => {
+        return colorAccessor(index, data, opts.dataAccessors.getFillColor);
+      } : opts.dataAccessors.getFillColor === null ? [0,0,0,255] :
+        isHexColor(opts.dataAccessors.getFillColor) ? hexToRGBA(opts.dataAccessors.getFillColor) :
+          opts.dataAccessors.getFillColor,
+
+    getLineColor: table_names.includes(opts.dataAccessors.getLineColor) ?
+      ({ index, data }) => {
+        return colorAccessor(index, data, opts.dataAccessors.getLineColor);
+      } : opts.dataAccessors.getLineColor === null ? [0,0,0,255] :
+        isHexColor(opts.dataAccessors.getLineColor) ? hexToRGBA(opts.dataAccessors.getLineColor) :
+          opts.dataAccessors.getLineColor,
+
+    getLineWidth: table_names.includes(opts.dataAccessors.getLineWidth) ?
+      ({ index, data }) => {
+        return attributeAccessor(index, data, opts.dataAccessors.getLineWidth);
+      } : opts.dataAccessors.getLineWidth === null ? 1 : opts.dataAccessors.getLineWidth,
+
+    getElevation: table_names.includes(opts.dataAccessors.getElevation) ?
+      ({ index, data }) => {
+        return attributeAccessor(index, data, opts.dataAccessors.getElevation);
+      } : opts.dataAccessors.getElevation === null ? 1 : opts.dataAccessors.getElevation,
+
+    onClick: opts.popup === null ? null : (info, event) => {
+        let popup = clickFun(info, event, opts, "popup", opts.map_class);
+        if (popup !== undefined) {
+          popup.addTo(map);
+        }
+    },
+
+    onHover: opts.tooltip === null ? null : (info, event) => {
+        if (info.picked === false) {
+          removePopups(opts.tooltipOptions.className);
+        }
+        let popup = clickFun(info, event, opts, "tooltip", opts.map_class);
+        if (popup !== undefined) {
+          popup.addTo(map);
+        }
+    },
+
+  });
+
+  return layer;
+
+};
